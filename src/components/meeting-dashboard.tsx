@@ -245,6 +245,14 @@ export function MeetingDashboard() {
               </TabsContent>
 
               <TabsContent value="summary" className="mt-4 grid gap-4 md:grid-cols-2">
+                <div className="rounded-lg border p-3 md:col-span-2">
+                  <h3 className="mb-2 text-sm font-semibold">摘要</h3>
+                  <p className="text-sm leading-6 text-muted-foreground">
+                    {meeting?.summary.summaryText?.trim()
+                      ? meeting.summary.summaryText
+                      : "暂无摘要（等待模型生成或转录内容不足）。"}
+                  </p>
+                </div>
                 <div className="rounded-lg border p-3">
                   <h3 className="mb-2 text-sm font-semibold">关键主题</h3>
                   <div className="flex flex-wrap gap-2">
@@ -271,7 +279,9 @@ export function MeetingDashboard() {
                   <div className="space-y-3">
                     {(meeting?.actions ?? []).map((a) => (
                       <div key={a.id} className="rounded-lg border bg-muted/30 p-3">
-                        <p className="text-sm font-medium">{a.description}</p>
+                        <p className="text-sm font-medium">
+                          {(a.owner ? `${a.owner}: ` : "") + a.description}
+                        </p>
                         <Separator className="my-2" />
                         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                           <Badge variant="outline">Owner: {a.owner ?? "待确认"}</Badge>

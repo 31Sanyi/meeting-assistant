@@ -20,16 +20,12 @@ export async function POST(req: Request, context: { params: Promise<{ id: string
     return Response.json({ error: "Invalid payload", details: parsed.error.flatten() }, { status: 400 });
   }
 
-  const updated = ingestTranscriptEvent(id, parsed.data);
+  const updated = await ingestTranscriptEvent(id, parsed.data);
   if (!updated) {
     return Response.json({ error: "Meeting not found" }, { status: 404 });
   }
 
   return Response.json({
-    meetingId: id,
-    transcriptCount: updated.transcript.length,
-    actionCount: updated.actions.length,
-    sentimentCount: updated.sentiments.length,
-    summaryUpdatedAt: updated.summary.updatedAt,
+    meeting: updated,
   });
 }

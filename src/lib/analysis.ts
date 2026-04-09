@@ -1,3 +1,4 @@
+import { generateSummaryWithLlm } from "@/lib/llm-client";
 import { ActionItem, Meeting, MeetingSummary, SentimentLabel, SentimentMoment, TranscriptSegment } from "@/types/meeting";
 
 const ACTION_PATTERNS = [
@@ -114,5 +115,43 @@ export function updateSummary(meeting: Meeting, latestSegment: TranscriptSegment
     risks: risks.slice(-6),
     nextActions: nextActions.slice(-8),
     updatedAt: new Date().toISOString(),
+  };
+}
+
+export async function updateSummaryWithLlmOrFallback(
+  meeting: Meeting,
+  transcriptWindow: TranscriptSegment[],
+): Promise<{ summary: MeetingSummary; actionItems: Array<{ owner: string; due: string | null; description: string }> | null }> {
+  const previousSummary = [
+    `topics: ${(meeting.summary.topics ?? []).join(", ") || "none"}`,
+    `decisions: ${(meeting.summary.decisions ?? []).join(" | ") || "none"}`,
+    `nextActions: ${(meeting.summary.nextActions ?? []).join(" | ") || "none"}`,
+    `risks: ${(meeting.summary.risks ?? []).join(" | ") || "none"}`,
+    `summaryText: ${meeting.summary.summaryText ?? "none"}`,
+  ].join("\n");
+
+  // Use full history (caller decides), but cap tokens by truncating oldest lines.
+  const windowLines = transcriptWindow.slice(-80).map((s) => `${s.speakerName}: ${s.text}`);
+  let llm = null;
+  try {
+    llm = await generateSummaryWithLlm({ transcriptWindow: windowLines, previousSummary });
+  } catch {
+    llm = null;
+  }
+  if (!llm) {
+    const latest = transcriptWindow[transcriptWindow.length - 1];
+    return { summary: updateSummary(meeting, latest), actionItems: null };
+  }
+
+  return {
+    summary: {
+      summaryText: llm.summaryText,
+      topics: llm.topics.slice(0, 10),
+      decisions: llm.decisions.slice(0, 10),
+      risks: llm.risks.slice(0, 10),
+      nextActions: llm.nextActions.slice(0, 15),
+      updatedAt: new Date().toISOString(),
+    },
+    actionItems: llm.actionItems.slice(0, 12),
   };
 }

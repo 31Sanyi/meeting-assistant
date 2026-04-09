@@ -1,7 +1,8 @@
-import { detectSentiment, extractActionItems, updateSummary } from "@/lib/analysis";
+import { detectSentiment, extractActionItems, updateSummaryWithLlmOrFallback } from "@/lib/analysis";
 import { IngestEventInput, Meeting, TranscriptSegment } from "@/types/meeting";
 
 const meetings = new Map<string, Meeting>();
+const llmLastRunAtMsByMeeting = new Map<string, number>();
 
 function createEmptyMeeting(id: string, title: string): Meeting {
   const now = new Date().toISOString();
@@ -38,7 +39,7 @@ export function listMeetings(): Meeting[] {
   return Array.from(meetings.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export function ingestTranscriptEvent(meetingId: string, input: IngestEventInput): Meeting | null {
+export async function ingestTranscriptEvent(meetingId: string, input: IngestEventInput): Promise<Meeting | null> {
   const meeting = meetings.get(meetingId);
   if (!meeting) return null;
 
@@ -75,6 +76,37 @@ export function ingestTranscriptEvent(meetingId: string, input: IngestEventInput
     meeting.sentiments.push(sentimentMoment);
   }
 
-  meeting.summary = updateSummary(meeting, segment);
+  const lastRun = llmLastRunAtMsByMeeting.get(meetingId) ?? 0;
+  const shouldRunLlm = now - lastRun >= 3500;
+  // Per project design: insights should be regenerated from the running meeting context.
+  const transcriptWindow = meeting.transcript;
+
+  if (shouldRunLlm) {
+    llmLastRunAtMsByMeeting.set(meetingId, now);
+    try {
+      const { summary, actionItems } = await updateSummaryWithLlmOrFallback(meeting, transcriptWindow);
+      meeting.summary = summary;
+
+      if (actionItems?.length) {
+        meeting.actions = actionItems.map((item) => ({
+          id: crypto.randomUUID(),
+          meetingId,
+          description: item.description,
+          owner: item.owner || null,
+          dueDate: item.due,
+          sourceSegmentId: segment.id,
+          confidence: 0.85,
+          status: "pending_confirmation" as const,
+        }));
+      }
+    } catch {
+      // Fall back to heuristics if LLM call fails.
+      const { summary } = await updateSummaryWithLlmOrFallback(meeting, transcriptWindow);
+      meeting.summary = summary;
+    }
+  } else {
+    const { summary } = await updateSummaryWithLlmOrFallback(meeting, transcriptWindow);
+    meeting.summary = summary;
+  }
   return meeting;
 }
