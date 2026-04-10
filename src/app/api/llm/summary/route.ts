@@ -24,6 +24,12 @@ export async function POST(request: NextRequest) {
       .map((line: string, i: number) => `${i + 1}. ${line}`)
       .join('\n');
 
+    // 检测语言
+    const hasChinese = /[\u4e00-\u9fa5]/.test(formattedTranscript);
+    const isEnglish = /[a-zA-Z]/.test(formattedTranscript) && formattedTranscript.length > 50;
+    
+    console.log('[LLM API] 检测到语言:', hasChinese ? '中文' : isEnglish ? '英文' : '未知');
+
     // 格式化历史摘要
     let previousSummaryText = '无';
     if (previousSummary && previousSummary !== 'none') {
@@ -37,7 +43,12 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const prompt = `你是一个专业的会议摘要助手。你的任务是根据会议对话记录，提取关键信息并以严格JSON格式返回。
+    // 根据语言选择不同的 Prompt
+    let prompt: string;
+    
+    if (hasChinese) {
+      // 中文会议 Prompt
+      prompt = `你是一个专业的会议摘要助手。你的任务是根据会议对话记录，提取关键信息并以严格JSON格式返回。
 
 ## 输出格式要求
 {
@@ -74,6 +85,38 @@ ${formattedTranscript}
 - 使用双引号，不要使用单引号
 
 请直接输出JSON：`;
+    } else {
+      // 英文/通用内容 Prompt
+      prompt = `You are a text analysis assistant. Analyze the following conversation/text and extract key information in JSON format.
+
+## Output Format
+{
+  "topics": ["topic1", "topic2", ...],
+  "decisions": ["decision1", "decision2", ...],
+  "nextActions": ["action1", "action2", ...],
+  "risks": ["risk1", "risk2", ...]
+}
+
+## Rules
+- topics: Extract main themes or recurring subjects (max 5)
+- decisions: Extract any conclusions or agreements reached (max 3)
+- nextActions: Extract any planned actions or next steps (max 4)
+- risks: Extract any obstacles, challenges, or concerns mentioned (max 3)
+- Return empty array [] if a category has no content
+- Keep each item concise (under 20 words)
+
+## Previous Summary (for reference)
+${previousSummaryText}
+
+## Content to Analyze
+${formattedTranscript}
+
+## Important
+- Output ONLY valid JSON, no explanation
+- Use double quotes, not single quotes
+
+Output JSON directly:`;
+    }
 
     console.log('[LLM API] 开始调用 LLM...');
 
@@ -82,37 +125,64 @@ ${formattedTranscript}
       messages: [
         {
           role: 'system',
-          content: '你是一个专业的会议摘要助手。你只输出JSON格式的会议摘要，不输出任何其他内容。'
+          content: hasChinese 
+            ? '你是一个专业的会议摘要助手。你只输出JSON格式的会议摘要，不输出任何其他内容。'
+            : 'You are a text analysis assistant. Output only valid JSON, no other text.'
         },
         {
           role: 'user',
           content: prompt
         }
       ],
-      temperature: 0.1,
-      max_tokens: 500,
-      response_format: { type: 'json_object' }
+      temperature: 0.3,  // 稍微提高温度，让英文内容有更好的理解
+      max_tokens: 800,
+
     });
 
     const text = response.choices[0]?.message?.content?.trim();
     if (!text) {
       console.error('[LLM API] 返回内容为空');
-      return NextResponse.json({ error: 'LLM 返回内容为空' }, { status: 500 });
+      // 返回空结果而不是错误
+      return NextResponse.json({ 
+        success: true, 
+        topics: [], 
+        decisions: [], 
+        nextActions: [], 
+        risks: [] 
+      });
     }
 
-    console.log('[LLM API] 原始响应:', text.substring(0, 200));
+    console.log('[LLM API] 原始响应:', text.substring(0, 300));
 
     // 解析 JSON
     let parsed;
     try {
       parsed = JSON.parse(text);
-    } catch {
+    } catch (parseError) {
+      console.warn('[LLM API] JSON 解析失败，尝试提取嵌入JSON...');
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        parsed = JSON.parse(jsonMatch[0]);
+        try {
+          parsed = JSON.parse(jsonMatch[0]);
+        } catch (nestedError) {
+          console.error('[LLM API] 嵌套JSON解析失败，返回空结果');
+          return NextResponse.json({ 
+            success: true, 
+            topics: [], 
+            decisions: [], 
+            nextActions: [], 
+            risks: [] 
+          });
+        }
       } else {
-        console.error('[LLM API] JSON 解析失败');
-        return NextResponse.json({ error: 'JSON 解析失败' }, { status: 500 });
+        console.error('[LLM API] JSON 解析失败，返回空结果');
+        return NextResponse.json({ 
+          success: true, 
+          topics: [], 
+          decisions: [], 
+          nextActions: [], 
+          risks: [] 
+        });
       }
     }
 
@@ -128,9 +198,13 @@ ${formattedTranscript}
     return NextResponse.json({ success: true, ...result });
   } catch (error) {
     console.error('[LLM API] 错误:', error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : '生成失败' },
-      { status: 500 }
-    );
+    // 返回空结果而不是错误，避免前端报错
+    return NextResponse.json({ 
+      success: true, 
+      topics: [], 
+      decisions: [], 
+      nextActions: [], 
+      risks: [] 
+    });
   }
 }

@@ -14,43 +14,30 @@ export interface LlmSummaryOutput {
  * 调用LLM生成会议摘要（通过后端 API）
  */
 export async function generateSummaryWithLlm(input: LlmSummaryInput): Promise<LlmSummaryOutput | null> {
-  if (!input.transcriptWindow || input.transcriptWindow.length === 0) {
-    console.warn("[LLM] 转录窗口为空，跳过摘要生成");
-    return null;
-  }
-
-  console.log(`[LLM] 开始生成摘要，共 ${input.transcriptWindow.length} 条转录`);
-
   try {
     const response = await fetch('/api/llm/summary', {
-      method: 'POST',
+      method: 'POST',  // 🔥 确保是 POST
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         transcriptWindow: input.transcriptWindow,
         previousSummary: input.previousSummary
       })
     });
-
-    const data = await response.json();
-
+    
     if (!response.ok) {
-      console.error('[LLM] API 错误:', data.error);
+      console.error('[LLM] API 响应错误:', response.status);
       return null;
     }
-
-    if (data.success) {
-      console.log(`[LLM] 摘要生成成功: 主题=${data.topics?.length}, 决策=${data.decisions?.length}, 行动=${data.nextActions?.length}, 风险=${data.risks?.length}`);
-      return {
-        topics: data.topics || [],
-        decisions: data.decisions || [],
-        nextActions: data.nextActions || [],
-        risks: data.risks || []
-      };
-    }
-
-    return null;
+    
+    const data = await response.json();
+    return {
+      topics: data.topics || [],
+      decisions: data.decisions || [],
+      nextActions: data.nextActions || [],
+      risks: data.risks || []
+    };
   } catch (error) {
-    console.error('[LLM] 请求失败:', error);
+    console.error('[LLM] 调用失败:', error);
     return null;
   }
 }

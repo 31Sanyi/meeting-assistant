@@ -9,6 +9,7 @@ interface VoiceAssistantProps {
   meetingId: string | null;
   onTranscriptReceived: (speakerName: string, text: string) => void;
   onInterimUpdate?: (text: string) => void;
+  onCreateMeeting?: () => Promise<string | null>;  // 新增：创建会议的回调
 }
 
 // 说话人映射
@@ -20,15 +21,52 @@ const speakerNameMap: Record<string, string> = {
   unknown: '发言人',
 };
 
-export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdate }: VoiceAssistantProps) {
+export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdate, onCreateMeeting }: VoiceAssistantProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [interimText, setInterimText] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [localMeetingId, setLocalMeetingId] = useState<string | null>(meetingId);
   
   const realtimeClientRef = useRef<TingwuRealtimeClient | null>(null);
 
-  // 初始化听悟客户端
+  // 确保有 meetingId，如果没有则创建
+  const ensureMeetingId = async (): Promise<string | null> => {
+    // 如果已有 meetingId，直接返回
+    if (localMeetingId) {
+      return localMeetingId;
+    }
+    
+    // 如果有创建会议的回调，调用它
+    if (onCreateMeeting) {
+      const newId = await onCreateMeeting();
+      if (newId) {
+        setLocalMeetingId(newId);
+        return newId;
+      }
+    }
+    
+    // 否则自己创建会议
+    try {
+      console.log('[VoiceAssistant] 没有会议，自动创建...');
+      const response = await fetch('/api/meetings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: '新会议' }),
+      });
+      const data = await response.json();
+      if (data.meeting?.id) {
+        setLocalMeetingId(data.meeting.id);
+        console.log('[VoiceAssistant] 会议创建成功:', data.meeting.id);
+        return data.meeting.id;
+      }
+      return null;
+    } catch (error) {
+      console.error('[VoiceAssistant] 创建会议失败:', error);
+      return null;
+    }
+  };
+
   // 初始化听悟客户端
   const initClient = () => {
     if (realtimeClientRef.current) return;
@@ -37,27 +75,16 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
       console.log('[VoiceAssistant] 收到识别结果:', result);
       
       if (result.isFinal) {
-        // 最终结果：提交到会议
         const speakerName = speakerNameMap[result.speakerId] || result.speakerId;
         console.log('[VoiceAssistant] 最终结果:', speakerName, result.text);
-        console.log('[VoiceAssistant] 准备调用 onTranscriptReceived');
-        
-        // 🔥 直接调用，不经过任何条件判断
         onTranscriptReceived(speakerName, result.text);
         
-        console.log('[VoiceAssistant] onTranscriptReceived 调用完成');
-        
         setInterimText('');
-        if (onInterimUpdate) {
-          onInterimUpdate('');
-        }
+        onInterimUpdate?.('');
       } else {
-        // 中间结果：显示预览
         console.log('[VoiceAssistant] 中间结果:', result.text);
         setInterimText(result.text);
-        if (onInterimUpdate) {
-          onInterimUpdate(result.text);
-        }
+        onInterimUpdate?.(result.text);
       }
     });
   };
@@ -65,6 +92,14 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
   // 开始录音
   const startRecording = async () => {
     setError(null);
+    
+    // 确保有 meetingId
+    const id = await ensureMeetingId();
+    if (!id) {
+      setError('创建会议失败，请刷新页面重试');
+      return;
+    }
+    
     initClient();
     
     if (!realtimeClientRef.current) {
@@ -92,6 +127,13 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
 
   // 上传音频文件
   const uploadAudio = async (file: File) => {
+    // 确保有 meetingId
+    const id = await ensureMeetingId();
+    if (!id) {
+      setError('创建会议失败，请刷新页面重试');
+      return;
+    }
+    
     setIsUploading(true);
     setError(null);
     
@@ -157,7 +199,7 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
   // 选择文件
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file && meetingId) {
+    if (file) {
       uploadAudio(file);
     }
     event.target.value = '';
@@ -172,6 +214,13 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
     };
   }, [isRecording]);
   
+  // 同步外部的 meetingId
+  useEffect(() => {
+    if (meetingId && !localMeetingId) {
+      setLocalMeetingId(meetingId);
+    }
+  }, [meetingId]);
+  
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -180,7 +229,7 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
             variant="outline"
             size="sm"
             onClick={startRecording}
-            disabled={!meetingId || isUploading}
+            disabled={isUploading}
             className="gap-2"
           >
             <Mic className="size-4" />
@@ -201,7 +250,7 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
         <Button
           variant="outline"
           size="sm"
-          disabled={!meetingId || isRecording || isUploading}
+          disabled={isRecording || isUploading}
           className="gap-2 relative overflow-hidden"
           onClick={() => document.getElementById('audio-upload-input')?.click()}
         >
@@ -214,7 +263,7 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
           className="hidden"
           accept="audio/*"
           onChange={handleFileSelect}
-          disabled={!meetingId || isRecording || isUploading}
+          disabled={isRecording || isUploading}
         />
         
         {isUploading && (

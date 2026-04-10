@@ -1,7 +1,6 @@
 // src/app/api/meetings/[meetingId]/snapshot/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 
-// 使用同一个存储
 const meetingsStore = new Map<string, any>();
 
 export async function GET(
@@ -9,23 +8,22 @@ export async function GET(
   { params }: { params: Promise<{ meetingId: string }> }
 ) {
   try {
-    const { meetingId } = await params;  // ← 添加 await
-    const meeting = meetingsStore.get(meetingId);
+    const { meetingId } = await params;
+    let meeting = meetingsStore.get(meetingId);
     
-    console.log('[Snapshot API] 获取会议:', meetingId, meeting ? '存在' : '不存在');
-    
+    // 🔥 如果会议不存在，返回空会议（而不是404）
     if (!meeting) {
-      // 返回空会议而不是404
-      return NextResponse.json({ 
-        meeting: {
-          id: meetingId,
-          transcript: [],
-          participants: [],
-          actions: [],
-          summary: { topics: [], decisions: [], nextActions: [] },
-          sentiments: []
-        }
-      });
+      console.log('[Snapshot API] 会议不存在，返回空会议:', meetingId);
+      meeting = {
+        id: meetingId,
+        transcript: [],
+        participants: [],
+        actions: [],
+        summary: { topics: [], decisions: [], nextActions: [], risks: [], updatedAt: new Date().toISOString() },
+        sentiments: [],
+        createdAt: new Date().toISOString(),
+        title: '新会议'
+      };
     }
     
     return NextResponse.json({ meeting });

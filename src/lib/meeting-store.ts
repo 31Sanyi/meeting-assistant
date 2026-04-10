@@ -88,16 +88,23 @@ export async function ingestTranscriptEvent(meetingId: string, input: IngestEven
       meeting.summary = summary;
 
       if (actionItems?.length) {
-        meeting.actions = actionItems.map((item) => ({
-          id: crypto.randomUUID(),
-          meetingId,
-          description: item.description,
-          owner: item.owner || null,
-          dueDate: item.due,
-          sourceSegmentId: segment.id,
-          confidence: 0.85,
-          status: "pending_confirmation" as const,
-        }));
+        const existingDescriptions = new Set(meeting.actions.map((a) => a.description));
+        const newActions = actionItems
+          .filter((item) => item.description && !existingDescriptions.has(item.description))
+          .map((item) => ({
+            id: crypto.randomUUID(),
+            meetingId,
+            description: item.description,
+            owner: item.owner || null,
+            dueDate: item.due,
+            sourceSegmentId: segment.id,
+            confidence: 0.85,
+            status: "pending_confirmation" as const,
+          }));
+
+        if (newActions.length) {
+          meeting.actions.push(...newActions);
+        }
       }
     } catch {
       // Fall back to heuristics if LLM call fails.

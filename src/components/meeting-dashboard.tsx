@@ -38,8 +38,12 @@ async function postSegment(meetingId: string, speakerName: string, text: string,
   });
 
   if (!res.ok) {
-    throw new Error("提交发言失败");
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.error || "提交发言失败");
   }
+
+  const data = await res.json();
+  return data.meeting as Meeting;
 }
 
 async function fetchSnapshot(meetingId: string) {
@@ -110,15 +114,17 @@ export function MeetingDashboard() {
     setError(null);
     setIsSubmitting(true);
     try {
-      await postSegment(meeting.id, speakerName, text.trim(), language);
-      const latest = await fetchSnapshot(meeting.id);
-      setMeeting(latest);
+      const updatedMeeting = await postSegment(meeting.id, speakerName, text.trim(), language);
+      setMeeting(updatedMeeting);
       setText("");
-      
-      const transcriptTexts = latest.transcript.map(
+
+      const transcriptTexts = updatedMeeting.transcript.map(
         seg => `${seg.speakerName}: ${seg.text}`
       );
-      await generateAndUpdateSummary(transcriptTexts);
+      const hasServerSummary = updatedMeeting.summary?.topics?.length || updatedMeeting.summary?.decisions?.length || updatedMeeting.summary?.nextActions?.length || updatedMeeting.summary?.risks?.length;
+      if (!hasServerSummary) {
+        await generateAndUpdateSummary(transcriptTexts);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "提交失败");
     } finally {
@@ -151,7 +157,6 @@ export function MeetingDashboard() {
         setMeeting(prev => {
           if (!prev) return prev;
           
-          // 将 nextActions 转换为 ActionItem 格式
           const newActions = (result.nextActions || []).map((action, index) => ({
               id: `action_${Date.now()}_${index}_${Math.random()}`,
               meetingId: prev.id,
@@ -163,7 +168,6 @@ export function MeetingDashboard() {
               confidence: 0.8
             }));
           
-          // 合并新旧行动项，去重
           const existingDescriptions = new Set(prev.actions.map(a => a.description));
           const uniqueNewActions = newActions.filter(a => !existingDescriptions.has(a.description));
           const allActions = [...prev.actions, ...uniqueNewActions];
@@ -190,17 +194,31 @@ export function MeetingDashboard() {
     }
   };
 
-  // 处理语音转录回调
+  // 处理语音转录回调 - 确保会议存在
   const handleVoiceTranscript = async (speakerName: string, text: string) => {
     console.log('[UI] 收到语音转录:', { speakerName, text });
     
-    if (!meeting?.id) return;
+    // 如果没有会议，先创建会议
+    let currentMeeting = meeting;
+    if (!currentMeeting?.id) {
+      console.log('[UI] 会议不存在，正在创建...');
+      try {
+        currentMeeting = await createMeeting(meetingTitle || '新会议');
+        setMeeting(currentMeeting);
+      } catch (e) {
+        console.error('[UI] 创建会议失败:', e);
+        setError('创建会议失败，请刷新页面重试');
+        return;
+      }
+    }
+    
+    if (!currentMeeting?.id) return;
     
     setInterimText("");
     
     const newSegment = {
       id: `temp_${Date.now()}_${Math.random()}`,
-      meetingId: meeting.id,
+      meetingId: currentMeeting.id,
       speakerName: speakerName,
       speakerId: 'unknown',
       text: text,
@@ -212,7 +230,7 @@ export function MeetingDashboard() {
       createdAt: new Date().toISOString()
     };
     
-    const currentTranscripts = meeting?.transcript || [];
+    const currentTranscripts = currentMeeting?.transcript || [];
     const allTranscriptTexts = [
       ...currentTranscripts.map(seg => `${seg.speakerName}: ${seg.text}`),
       `${speakerName}: ${text}`
@@ -227,11 +245,16 @@ export function MeetingDashboard() {
     });
     
     try {
-      await postSegment(meeting.id, speakerName, text, language);
-      console.log('[UI] 后端保存成功');
-      
-      await generateAndUpdateSummary(allTranscriptTexts);
-      
+      const updatedMeeting = await postSegment(currentMeeting.id, speakerName, text, language);
+      console.log('[UI] 后端保存成功', updatedMeeting);
+      setMeeting(updatedMeeting);
+
+      const transcriptTexts = updatedMeeting.transcript.map(seg => `${seg.speakerName}: ${seg.text}`);
+      const hasServerSummary = updatedMeeting.summary?.topics?.length || updatedMeeting.summary?.decisions?.length || updatedMeeting.summary?.nextActions?.length || updatedMeeting.summary?.risks?.length;
+
+      if (!hasServerSummary) {
+        await generateAndUpdateSummary(transcriptTexts);
+      }
     } catch (e) {
       console.error('[UI] 保存失败:', e);
       setError(e instanceof Error ? e.message : "语音提交失败");
