@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
         }
       ],
       temperature: 0.1,
-      max_tokens: 200,
+      max_tokens: 2000,
     });
 
     const translation = response.choices[0]?.message?.content?.trim();

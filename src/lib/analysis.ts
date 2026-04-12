@@ -121,7 +121,7 @@ export function updateSummary(meeting: Meeting, latestSegment: TranscriptSegment
 export async function updateSummaryWithLlmOrFallback(
   meeting: Meeting,
   transcriptWindow: TranscriptSegment[],
-): Promise<{ summary: MeetingSummary; actionItems: Array<{ owner: string | null; due: string | null; description: string }> | null }> {
+): Promise<{ summary: MeetingSummary; actionItems: Array<{ owner: string; due: string | null; description: string }> | null }> {
   const previousSummary = [
     `topics: ${(meeting.summary.topics ?? []).join(", ") || "none"}`,
     `decisions: ${(meeting.summary.decisions ?? []).join(" | ") || "none"}`,
@@ -129,7 +129,6 @@ export async function updateSummaryWithLlmOrFallback(
     `risks: ${(meeting.summary.risks ?? []).join(" | ") || "none"}`,
   ].join("\n");
 
-  // Use full history (caller decides), but cap tokens by truncating oldest lines.
   const windowLines = transcriptWindow.slice(-80).map((s) => `${s.speakerName}: ${s.text}`);
   let llm = null;
   try {
@@ -137,24 +136,21 @@ export async function updateSummaryWithLlmOrFallback(
   } catch {
     llm = null;
   }
+  
   if (!llm) {
     const latest = transcriptWindow[transcriptWindow.length - 1];
     return { summary: updateSummary(meeting, latest), actionItems: null };
   }
 
-  const nextActions = llm.nextActions.slice(0, 15).filter((item) => item && item.trim());
   return {
     summary: {
+      summaryText: llm.summaryText,  // ✅ 新增
       topics: llm.topics.slice(0, 10),
       decisions: llm.decisions.slice(0, 10),
       risks: llm.risks.slice(0, 10),
-      nextActions,
+      nextActions: llm.nextActions.slice(0, 15),
       updatedAt: new Date().toISOString(),
     },
-    actionItems: nextActions.map((description) => ({
-      owner: null,
-      due: inferDueDate(description),
-      description,
-    })),
+    actionItems: llm.actionItems?.slice(0, 12) || null,  // ✅ 新增：使用 LLM 返回的 actionItems
   };
 }

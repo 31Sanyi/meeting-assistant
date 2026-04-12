@@ -41,6 +41,7 @@ export interface SentimentMoment {
 }
 
 export interface MeetingSummary {
+  summaryText?: string; 
   topics: string[];
   decisions: string[];
   risks: string[];
