@@ -41,8 +41,9 @@ export interface SentimentMoment {
 }
 
 export interface MeetingSummary {
-  summaryText?: string; 
+  summaryText?: string;
   topics: string[];
+  briefPoints?: string[];  // ✅ 新增
   decisions: string[];
   risks: string[];
   nextActions: string[];
@@ -65,5 +66,6 @@ export interface IngestEventInput {
   text: string;
   language?: string;
   isFinal?: boolean;
-  translatedText?: string; 
+  translatedText?: string;
+  preferChineseSummary?: boolean;  // ✅ 新增
 }

@@ -1,72 +1,78 @@
 import { generateSummaryWithLlm } from "@/lib/llm-client";
 import { ActionItem, Meeting, MeetingSummary, SentimentLabel, SentimentMoment, TranscriptSegment } from "@/types/meeting";
 
+// ========== 情绪分析（旧版：调用 LLM）==========
+function getApiUrl(path: string): string {
+  if (typeof window !== 'undefined') return path;
+  let baseUrl = process.env.NEXT_PUBLIC_APP_URL;
+  if (!baseUrl) {
+    if (process.env.NODE_ENV === 'development') {
+      baseUrl = 'http://localhost:3000';
+    } else {
+      throw new Error('NEXT_PUBLIC_APP_URL is not set in production');
+    }
+  }
+  return `${baseUrl}${path}`;
+}
+
+export async function detectSentiment(segment: TranscriptSegment): Promise<SentimentMoment | null> {
+  if (!segment.isFinal) return null;
+  if (segment.text.trim().length < 3) {
+    return {
+      id: crypto.randomUUID(),
+      meetingId: segment.meetingId,
+      label: "neutral",
+      intensity: 0.5,
+      sourceSegmentId: segment.id,
+      evidenceText: segment.text,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  try {
+    const url = getApiUrl('/api/llm/sentiment');
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: segment.text })
+    });
+    const data = await response.json();
+    return {
+      id: crypto.randomUUID(),
+      meetingId: segment.meetingId,
+      label: data.sentiment as SentimentLabel,
+      intensity: data.confidence,
+      sourceSegmentId: segment.id,
+      evidenceText: segment.text,
+      createdAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    console.error('[情绪分析] 调用失败:', error);
+    return {
+      id: crypto.randomUUID(),
+      meetingId: segment.meetingId,
+      label: "neutral",
+      intensity: 0.5,
+      sourceSegmentId: segment.id,
+      evidenceText: segment.text,
+      createdAt: new Date().toISOString(),
+    };
+  }
+}
+
+// ========== 行动项规则匹配（旧版）==========
 const ACTION_PATTERNS = [
-  /(我|I)\s*(会|will)\s*(在|by)?\s*(周[一二三四五六日天]|Friday|Monday|Tuesday|Wednesday|Thursday|Saturday|Sunday|\d{4}-\d{2}-\d{2})?.{0,20}(发送|提交|完成|整理|follow up|send|deliver|prepare)/i,
+  /(我|I)\s*(会|will)\s*(在|by)?\s*(周[一二三四五六日天]|Friday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|\d{4}-\d{2}-\d{2})?.{0,20}(发送|提交|完成|整理|follow up|send|deliver|prepare)/i,
   /(请|please).{0,18}(你|you).{0,18}(完成|处理|跟进|review|update|fix)/i,
   /(action item|todo|待办|后续)/i,
 ];
 
-const POSITIVE_PATTERNS = /(同意|赞同|没问题|很好|great|sounds good|agree)/i;
-const NEGATIVE_PATTERNS = /(不同意|不相信|不行|风险|担心|disagree|won't work|concern)/i;
-const HESITATION_PATTERNS = /(可能|也许|不确定|maybe|not sure|perhaps)/i;
-const TENSION_PATTERNS = /(争论|冲突|紧张|angry|frustrated|tense)/i;
-
-function extractTopics(text: string): string[] {
-  const raw = text
-    .replace(/[.,!?;:]/g, " ")
-    .split(/\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .filter((w) => w.length > 3);
-
-  return [...new Set(raw)].slice(0, 3);
-}
-
 export function inferDueDate(text: string): string | null {
   const m = text.match(/(\d{4}-\d{2}-\d{2})/);
   if (m?.[1]) return `${m[1]}T17:00:00.000Z`;
-
-  if (/周五|Friday/i.test(text)) {
-    return "Friday";
-  }
-
-  if (/明天|tomorrow/i.test(text)) {
-    return "tomorrow";
-  }
-
+  if (/周五|Friday/i.test(text)) return "Friday";
+  if (/明天|tomorrow/i.test(text)) return "tomorrow";
   return null;
-}
-
-export function detectSentiment(segment: TranscriptSegment): SentimentMoment | null {
-  let label: SentimentLabel | null = null;
-  let intensity = 0.5;
-
-  if (TENSION_PATTERNS.test(segment.text)) {
-    label = "tension";
-    intensity = 0.85;
-  } else if (NEGATIVE_PATTERNS.test(segment.text)) {
-    label = "disagreement";
-    intensity = 0.75;
-  } else if (HESITATION_PATTERNS.test(segment.text)) {
-    label = "hesitation";
-    intensity = 0.6;
-  } else if (POSITIVE_PATTERNS.test(segment.text)) {
-    label = "agreement";
-    intensity = 0.7;
-  }
-
-  if (!label) return null;
-
-  return {
-    id: crypto.randomUUID(),
-    meetingId: segment.meetingId,
-    label,
-    intensity,
-    sourceSegmentId: segment.id,
-    evidenceText: segment.text,
-    createdAt: new Date().toISOString(),
-  };
 }
 
 export function extractActionItems(segment: TranscriptSegment): ActionItem[] {
@@ -90,30 +96,96 @@ export function extractActionItems(segment: TranscriptSegment): ActionItem[] {
   ];
 }
 
-export function updateSummary(meeting: Meeting, latestSegment: TranscriptSegment): MeetingSummary {
-  const prev = meeting.summary;
-  const lowered = latestSegment.text.toLowerCase();
+// ========== 摘要和行动项 LLM（新版：长摘要 + briefPoints + actionItems）==========
+function mergeStringLists(prev: string[], incoming: string[], max: number): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of [...prev, ...incoming]) {
+    const t = s?.trim();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+    if (out.length >= max) break;
+  }
+  return out;
+}
 
-  const topics = [...new Set([...prev.topics, ...extractTopics(latestSegment.text)])].slice(0, 10);
-  const decisions = [...prev.decisions];
-  const risks = [...prev.risks];
-  const nextActions = [...prev.nextActions];
+function normalizeComparable(s: string): string {
+  return s.trim().toLowerCase().replace(/[.,!?;:]/g, " ").replace(/\s+/g, " ").trim();
+}
 
-  if (/(决定|decide|结论|final)/i.test(lowered)) {
-    decisions.push(latestSegment.text);
+function stringsLikelyDuplicate(a: string, b: string): boolean {
+  const na = normalizeComparable(a);
+  const nb = normalizeComparable(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const ca = na.replace(/\s/g, "");
+  const cb = nb.replace(/\s/g, "");
+  if (ca === cb) return true;
+  const short = ca.length <= cb.length ? ca : cb;
+  const long = ca.length <= cb.length ? cb : ca;
+  if (short.length >= 4 && long.includes(short)) return true;
+  return false;
+}
+
+export function dedupeSimilarStrings(items: string[], mode: "topic" | "sentence"): string[] {
+  const out: string[] = [];
+  for (const raw of items) {
+    const t = raw?.trim();
+    if (!t) continue;
+    const dupIdx = out.findIndex((e) => stringsLikelyDuplicate(e, t));
+    if (dupIdx >= 0) {
+      if (t.length > out[dupIdx].length) out[dupIdx] = t;
+      continue;
+    }
+    out.push(t);
   }
-  if (/(风险|阻塞|blocker|issue|problem)/i.test(lowered)) {
-    risks.push(latestSegment.text);
-  }
-  if (/(下一步|next step|follow up|待办|action)/i.test(lowered)) {
-    nextActions.push(latestSegment.text);
-  }
+  return out;
+}
+
+export function stripSummaryListOrdinalPrefix(raw: string): string {
+  let s = raw.trim();
+  s = s.replace(/^\d{1,2}(?:[\.、．:：]|[\)）\]])[\s\u3000]*/u, "").trim();
+  s = s.replace(/^(?:第一|第二|第三|第四|第五)[，,：:、．.）)\s]+/u, "").trim();
+  return s;
+}
+
+export function mergeMeetingSummaries(prev: MeetingSummary, incoming: MeetingSummary): MeetingSummary {
+  const incomingText = incoming.summaryText?.trim() ?? "";
+  const summaryText = incomingText || prev.summaryText?.trim() || "";
+
+  const topicsMerged = mergeStringLists(prev.topics ?? [], incoming.topics ?? [], 20);
+  const briefMerged = mergeStringLists(
+    (prev.briefPoints ?? []).map(stripSummaryListOrdinalPrefix),
+    (incoming.briefPoints ?? []).map(stripSummaryListOrdinalPrefix),
+    14,
+  );
+  const risksMerged = mergeStringLists(
+    (prev.risks ?? []).map(stripSummaryListOrdinalPrefix),
+    (incoming.risks ?? []).map(stripSummaryListOrdinalPrefix),
+    16,
+  );
 
   return {
-    topics: topics.slice(-8),
-    decisions: decisions.slice(-6),
-    risks: risks.slice(-6),
-    nextActions: nextActions.slice(-8),
+    summaryText: summaryText || undefined,
+    topics: dedupeSimilarStrings(topicsMerged, "topic").slice(0, 6),
+    briefPoints: dedupeSimilarStrings(briefMerged, "sentence").slice(0, 6),
+    decisions: mergeStringLists(prev.decisions ?? [], incoming.decisions ?? [], 14),
+    risks: dedupeSimilarStrings(risksMerged, "sentence").slice(0, 4),
+    nextActions: mergeStringLists(prev.nextActions ?? [], incoming.nextActions ?? [], 22),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+export function updateSummary(meeting: Meeting, latestSegment: TranscriptSegment): MeetingSummary {
+  const prev = meeting.summary;
+  return {
+    summaryText: prev.summaryText,
+    topics: prev.topics,
+    briefPoints: prev.briefPoints,
+    decisions: prev.decisions,
+    risks: prev.risks,
+    nextActions: prev.nextActions,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -121,36 +193,45 @@ export function updateSummary(meeting: Meeting, latestSegment: TranscriptSegment
 export async function updateSummaryWithLlmOrFallback(
   meeting: Meeting,
   transcriptWindow: TranscriptSegment[],
+  options?: { preferChineseOutput?: boolean }
 ): Promise<{ summary: MeetingSummary; actionItems: Array<{ owner: string; due: string | null; description: string }> | null }> {
-  const previousSummary = [
-    `topics: ${(meeting.summary.topics ?? []).join(", ") || "none"}`,
-    `decisions: ${(meeting.summary.decisions ?? []).join(" | ") || "none"}`,
-    `nextActions: ${(meeting.summary.nextActions ?? []).join(" | ") || "none"}`,
-    `risks: ${(meeting.summary.risks ?? []).join(" | ") || "none"}`,
-  ].join("\n");
+  const previousSummary = JSON.stringify({
+    summaryText: meeting.summary.summaryText ?? "",
+    briefPoints: meeting.summary.briefPoints ?? [],
+    topics: meeting.summary.topics ?? [],
+    decisions: meeting.summary.decisions ?? [],
+    nextActions: meeting.summary.nextActions ?? [],
+    risks: meeting.summary.risks ?? [],
+  });
 
   const windowLines = transcriptWindow.slice(-80).map((s) => `${s.speakerName}: ${s.text}`);
   let llm = null;
   try {
-    llm = await generateSummaryWithLlm({ transcriptWindow: windowLines, previousSummary });
+    llm = await generateSummaryWithLlm({
+      transcriptWindow: windowLines,
+      previousSummary,
+      preferChineseOutput: options?.preferChineseOutput,
+    });
   } catch {
     llm = null;
   }
   
   if (!llm) {
-    const latest = transcriptWindow[transcriptWindow.length - 1];
-    return { summary: updateSummary(meeting, latest), actionItems: null };
+    return { summary: meeting.summary, actionItems: null };
   }
 
+  const incoming: MeetingSummary = {
+    summaryText: llm.summaryText,
+    topics: (llm.topics ?? []).slice(0, 12),
+    briefPoints: (llm.briefPoints ?? []).slice(0, 6),
+    decisions: (llm.decisions ?? []).slice(0, 12),
+    risks: (llm.risks ?? []).slice(0, 12),
+    nextActions: (llm.nextActions ?? []).slice(0, 22),
+    updatedAt: new Date().toISOString(),
+  };
+
   return {
-    summary: {
-      summaryText: llm.summaryText,  // ✅ 新增
-      topics: llm.topics.slice(0, 10),
-      decisions: llm.decisions.slice(0, 10),
-      risks: llm.risks.slice(0, 10),
-      nextActions: llm.nextActions.slice(0, 15),
-      updatedAt: new Date().toISOString(),
-    },
-    actionItems: llm.actionItems?.slice(0, 12) || null,  // ✅ 新增：使用 LLM 返回的 actionItems
+    summary: mergeMeetingSummaries(meeting.summary, incoming),
+    actionItems: llm.actionItems?.slice(0, 12) || null,
   };
 }

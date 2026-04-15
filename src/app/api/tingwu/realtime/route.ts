@@ -1,115 +1,79 @@
-// src/app/api/tingwu/realtime/route.ts
 import { NextResponse } from 'next/server';
-import { getTingwuConfig } from '@/lib/tingwu/config';
 import * as crypto from 'crypto';
 
-function generateRoaSignature(
-  accessKeySecret: string,
-  method: string,
-  pathname: string,
-  headers: Record<string, string>,
-  body: string
-): string {
-  const accept = headers['Accept'] || 'application/json';
-  const contentMd5 = headers['Content-MD5'] || '';
-  const contentType = headers['Content-Type'] || 'application/json';
-  const date = headers['Date'] || '';
-  
-  const stringToSign = `${method}\n${accept}\n${contentMd5}\n${contentType}\n${date}\n${pathname}`;
-  
-  const signature = crypto
+function formatUtcPlus0800(date: Date): string {
+  const utc8 = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  const yyyy = utc8.getUTCFullYear();
+  const mm = String(utc8.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(utc8.getUTCDate()).padStart(2, '0');
+  const hh = String(utc8.getUTCHours()).padStart(2, '0');
+  const mi = String(utc8.getUTCMinutes()).padStart(2, '0');
+  const ss = String(utc8.getUTCSeconds()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}+0800`;
+}
+
+function signIflyParams(params: Record<string, string>, accessKeySecret: string): string {
+  const baseString = Object.keys(params)
+    .sort((a, b) => a.localeCompare(b))
+    .map((key) => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
+    .join('&');
+
+  return crypto
     .createHmac('sha1', accessKeySecret)
-    .update(stringToSign)
+    .update(baseString)
     .digest('base64');
-  
-  return signature;
 }
 
 export async function POST() {
-  const config = getTingwuConfig();
-  
-  if (!config) {
-    return NextResponse.json({ 
-      error: '听悟未配置，请检查.env.local' 
-    }, { status: 503 });
+  const appId = process.env.IFLY_APP_ID;
+  const accessKeyId = process.env.IFLY_ACCESS_KEY_ID;
+  const accessKeySecret = process.env.IFLY_ACCESS_KEY_SECRET;
+  const endpoint = process.env.IFLY_RTASR_ENDPOINT || 'wss://office-api-ast-dx.iflyaisol.com/ast/communicate/v1';
+
+  if (!appId || !accessKeyId || !accessKeySecret) {
+    return NextResponse.json(
+      { error: '讯飞实时转写未配置，请检查 IFLY_APP_ID / IFLY_ACCESS_KEY_ID / IFLY_ACCESS_KEY_SECRET' },
+      { status: 503 }
+    );
   }
 
   try {
-    // 🔥 添加说话人分离配置
-    const body = {
-      AppKey: config.appKey,
-      Input: {
-        SourceLanguage: "cn",
-        Format: "pcm",
-        SampleRate: 16000
-      },
-      Parameters: {
-        Transcription: {
-          DiarizationEnabled: true,   // 开启说话人分离
-          Diarization: {
-            SpeakerCount: 2            // 2人对话，0表示自动识别
-          }
-        }
-      }
+    const utc = formatUtcPlus0800(new Date());
+    const sessionId = crypto.randomUUID();
+
+    // 不启用领域参数 pd；多语识别使用 autodialect；角色分离启用盲分 role_type=2
+    const params: Record<string, string> = {
+      accessKeyId,
+      appId,
+      uuid: sessionId,
+      utc,
+      audio_encode: 'pcm_s16le',
+      lang: 'autodialect',
+      samplerate: '16000',
+      role_type: '2',
     };
 
-    const bodyStr = JSON.stringify(body);
-    const date = new Date().toUTCString();
-    const pathname = '/openapi/tingwu/v2/tasks?type=realtime';
-    
-    const headers: Record<string, string> = {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json',
-      'Date': date,
-      'Host': `tingwu.${config.region}.aliyuncs.com`,
-    };
+    const signature = signIflyParams(params, accessKeySecret);
+    const query = new URLSearchParams({ ...params, signature });
+    const wsUrl = `${endpoint}?${query.toString()}`;
 
-    const signature = generateRoaSignature(
-      config.accessKeySecret,
-      'PUT',
-      pathname,
-      headers,
-      bodyStr
-    );
+    console.log('[讯飞] 已生成实时握手 URL', {
+      endpoint,
+      lang: params.lang,
+      roleType: params.role_type,
+      sessionId,
+    });
 
-    headers['Authorization'] = `acs ${config.accessKeyId}:${signature}`;
-
-    console.log('[听悟] 请求 URL:', `https://tingwu.${config.region}.aliyuncs.com${pathname}`);
-    console.log('[听悟] 请求体:', bodyStr);
-
-    const response = await fetch(
-      `https://tingwu.${config.region}.aliyuncs.com${pathname}`,
-      {
-        method: 'PUT',
-        headers,
-        body: bodyStr,
-      }
-    );
-
-    const data = await response.json();
-    console.log('[听悟] 响应状态:', response.status);
-    console.log('[听悟] 响应体:', JSON.stringify(data, null, 2));
-
-    if (!response.ok) {
-      throw new Error(data.Message || `HTTP ${response.status}`);
-    }
-
-    const taskId = data.Data?.TaskId;
-    const wsUrl = data.Data?.MeetingJoinUrl;
-
-    if (!taskId) {
-      throw new Error('返回数据缺少 TaskId');
-    }
-
-    return NextResponse.json({ 
-      taskId, 
-      wsUrl: wsUrl || `wss://tingwu.${config.region}.aliyuncs.com/api/ws/v1?taskId=${taskId}` 
+    return NextResponse.json({
+      provider: 'ifly',
+      wsUrl,
+      sessionId,
     });
   } catch (error: any) {
-    console.error('[听悟] 创建实时任务失败:', error);
+    console.error('[讯飞] 创建实时连接参数失败:', error);
     return NextResponse.json(
-      { 
-        error: '创建实时任务失败', 
+      {
+        error: '创建讯飞实时连接失败',
         details: error.message || '未知错误',
       },
       { status: 500 }

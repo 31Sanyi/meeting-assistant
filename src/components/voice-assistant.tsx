@@ -17,7 +17,6 @@ const speakerNameMap: Record<string, string> = {
   speaker_1: '参会者A',
   speaker_2: '参会者B',
   speaker_3: '参会者C',
-  speaker_4: '参会者D',
   unknown: '发言人',
 };
 
@@ -111,7 +110,7 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
     if (success) {
       setIsRecording(true);
     } else {
-      setError('启动录音失败，请检查麦克风权限和听悟配置');
+      setError('启动录音失败，请检查麦克风权限和讯飞配置');
     }
   };
 
@@ -233,7 +232,7 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
             className="gap-2"
           >
             <Mic className="size-4" />
-            开始录音
+            Start Recording
           </Button>
         ) : (
           <Button
@@ -243,7 +242,7 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
             className="gap-2"
           >
             <Square className="size-4" />
-            停止录音
+            Stop Recording
           </Button>
         )}
         
@@ -255,7 +254,7 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
           onClick={() => document.getElementById('audio-upload-input')?.click()}
         >
           <Upload className="size-4" />
-          上传音频
+          Upload Audio
         </Button>
         <input
           id="audio-upload-input"
@@ -269,7 +268,7 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
         {isUploading && (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="size-4 animate-spin" />
-            转写中...
+            Transcribing...
           </div>
         )}
       </div>
@@ -290,10 +289,10 @@ export function VoiceAssistant({ meetingId, onTranscriptReceived, onInterimUpdat
       
       {!isRecording && !interimText && !error && (
         <p className="text-xs text-muted-foreground">
-          🎙️ 点击开始录音，实时转写并自动区分说话人
-          <br />
-          📁 或上传音频文件（MP3/WAV/M4A），系统将自动转写
-        </p>
+       🎙️ Click to start recording, real-time transcription with automatic speaker diarization
+        <br />
+       📁 Or upload an audio file (MP3/WAV/M4A), the system will transcribe it automatically
+       </p>
       )}
     </div>
   );

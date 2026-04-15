@@ -10,7 +10,10 @@ export class TingwuRealtimeClient {
   private processorNode: ScriptProcessorNode | null = null;
   private isRecordingFlag = false;
   private onResult: RealtimeCallback;
-  private taskId: string | null = null;
+  private sessionId: string | null = null;
+  private lastSpeakerId: string = 'speaker_1';
+  private pcmBuffer: Uint8Array = new Uint8Array(0);
+  private sendTimer: number | null = null;
 
   constructor(onResult: RealtimeCallback) {
     this.onResult = onResult;
@@ -19,7 +22,7 @@ export class TingwuRealtimeClient {
   // 开始录音
   async start(): Promise<boolean> {
     try {
-      // 1. 创建听悟实时任务
+      // 1. 获取讯飞实时握手 URL
       const response = await fetch('/api/tingwu/realtime', { method: 'POST' });
       const data = await response.json();
       
@@ -27,11 +30,12 @@ export class TingwuRealtimeClient {
         throw new Error(data.error || '创建任务失败');
       }
       
-      this.taskId = data.taskId;
       const wsUrl = data.wsUrl;
+      this.sessionId = data.sessionId || crypto.randomUUID();
+      this.lastSpeakerId = 'speaker_1';
+      this.pcmBuffer = new Uint8Array(0);
       
-      console.log('[听悟] 任务创建成功, TaskId:', this.taskId);
-      console.log('[听悟] WebSocket URL:', wsUrl);
+      console.log('[讯飞] 握手 URL 已就绪, SessionId:', this.sessionId);
       
       // 2. 连接 WebSocket
       this.ws = new WebSocket(wsUrl);
@@ -43,45 +47,30 @@ export class TingwuRealtimeClient {
         }
         
         this.ws.onopen = async () => {
-          console.log('[听悟] WebSocket 连接成功');
-          
-          // 发送启动消息（必须！）
-          const startMessage = {
-            header: {
-              name: "StartTranscription",
-              namespace: "SpeechTranscriber",
-              version: "1.0"
-            },
-            payload: {
-              format: "pcm",
-              sample_rate: 16000,
-              language: "cn"
-            }
-          };
-          this.ws!.send(JSON.stringify(startMessage));
-          console.log('[听悟] 已发送启动消息');
-          
-          // 启动麦克风
+          console.log('[讯飞] WebSocket 连接成功');
+
+          // 启动麦克风与音频发送循环
           const micSuccess = await this.startMicrophone();
           resolve(micSuccess);
         };
         
         this.ws.onerror = (error) => {
-          console.error('[听悟] WebSocket 错误:', error);
+          console.error('[讯飞] WebSocket 错误:', error);
           reject(false);
         };
         
         this.ws.onclose = (event) => {
-          console.log('[听悟] WebSocket 关闭:', event.code, event.reason);
+          console.log('[讯飞] WebSocket 关闭:', event.code, event.reason);
         };
         
         this.ws.onmessage = (event) => {
-          console.log('[听悟] WebSocket 原始消息:', event.data);
-          this.handleMessage(event.data);
+          if (typeof event.data === 'string') {
+            this.handleMessage(event.data);
+          }
         };
       });
     } catch (error) {
-      console.error('[听悟] 启动失败:', error);
+      console.error('[讯飞] 启动失败:', error);
       return false;
     }
   }
@@ -89,19 +78,21 @@ export class TingwuRealtimeClient {
   // 停止录音
   async stop(): Promise<void> {
     this.isRecordingFlag = false;
+    this.stopSendLoop();
     
-    // 发送结束消息
+    // 发送结束消息（讯飞协议）
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (this.pcmBuffer.byteLength > 0) {
+        this.ws.send(new Uint8Array(this.pcmBuffer));
+        this.pcmBuffer = new Uint8Array(0);
+      }
+
       const stopMessage = {
-        header: {
-          name: "StopTranscription",
-          namespace: "SpeechTranscriber",
-          version: "1.0"
-        },
-        payload: {}
+        end: true,
+        sessionId: this.sessionId || crypto.randomUUID(),
       };
       this.ws.send(JSON.stringify(stopMessage));
-      console.log('[听悟] 已发送结束消息');
+      console.log('[讯飞] 已发送结束消息');
       
       await new Promise(resolve => setTimeout(resolve, 500));
       this.ws.close();
@@ -125,8 +116,11 @@ export class TingwuRealtimeClient {
       this.mediaStream.getTracks().forEach(track => track.stop());
       this.mediaStream = null;
     }
+    this.sessionId = null;
+    this.lastSpeakerId = 'speaker_1';
+    this.pcmBuffer = new Uint8Array(0);
     
-    console.log('[听悟] 录音已停止');
+    console.log('[讯飞] 录音已停止');
   }
 
   get isRecording(): boolean {
@@ -134,7 +128,40 @@ export class TingwuRealtimeClient {
   }
 
   get currentTaskId(): string | null {
-    return this.taskId;
+    return this.sessionId;
+  }
+
+  private appendPcmChunk(chunk: Uint8Array) {
+    const merged = new Uint8Array(this.pcmBuffer.byteLength + chunk.byteLength);
+    merged.set(this.pcmBuffer, 0);
+    merged.set(chunk, this.pcmBuffer.byteLength);
+    this.pcmBuffer = merged;
+  }
+
+  private startSendLoop() {
+    if (this.sendTimer !== null) return;
+
+    // 讯飞文档建议：每40ms发送1280字节（16k/16bit/单声道）
+    this.sendTimer = window.setInterval(() => {
+      if (!this.isRecordingFlag || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+
+      if (this.pcmBuffer.byteLength < 1280) {
+        return;
+      }
+
+      const frame = this.pcmBuffer.slice(0, 1280);
+      this.pcmBuffer = this.pcmBuffer.slice(1280);
+      this.ws.send(frame);
+    }, 40);
+  }
+
+  private stopSendLoop() {
+    if (this.sendTimer !== null) {
+      window.clearInterval(this.sendTimer);
+      this.sendTimer = null;
+    }
   }
 
   // 线性插值重采样函数
@@ -175,10 +202,10 @@ export class TingwuRealtimeClient {
       const actualSampleRate = this.audioContext.sampleRate;
       const targetSampleRate = 16000;
       
-      console.log(`[听悟] 浏览器实际采样率: ${actualSampleRate}Hz, 目标采样率: ${targetSampleRate}Hz`);
+      console.log(`[讯飞] 浏览器实际采样率: ${actualSampleRate}Hz, 目标采样率: ${targetSampleRate}Hz`);
       
       if (actualSampleRate !== targetSampleRate) {
-        console.log(`[听悟] 需要重采样: ${actualSampleRate}Hz -> ${targetSampleRate}Hz`);
+        console.log(`[讯飞] 需要重采样: ${actualSampleRate}Hz -> ${targetSampleRate}Hz`);
       }
       
       this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
@@ -210,8 +237,8 @@ export class TingwuRealtimeClient {
         }
         
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          const buffer = pcmData.buffer.slice(0) as ArrayBuffer;
-          this.ws.send(buffer);
+          const chunk = new Uint8Array(pcmData.buffer.slice(0));
+          this.appendPcmChunk(chunk);
         }
       };
       
@@ -220,59 +247,105 @@ export class TingwuRealtimeClient {
       await this.audioContext.resume();
       
       this.isRecordingFlag = true;
-      console.log('[听悟] 麦克风已启动，音频处理已开始');
+      this.startSendLoop();
+      console.log('[讯飞] 麦克风已启动，音频处理已开始');
       return true;
       
     } catch (error) {
-      console.error('[听悟] 麦克风启动失败:', error);
+      console.error('[讯飞] 麦克风启动失败:', error);
       return false;
     }
   }
 
-  // 处理 WebSocket 消息
+  private normalizeSpeaker(rawRl: unknown): string {
+    const rl = Number(rawRl);
+    if (Number.isNaN(rl) || rl === 0) {
+      return this.lastSpeakerId;
+    }
+
+    // 产品要求仅区分说话人 1/2/3，超过3统一归并到3。
+    const n = rl <= 1 ? 1 : rl === 2 ? 2 : 3;
+    const speakerId = `speaker_${n}`;
+    this.lastSpeakerId = speakerId;
+    return speakerId;
+  }
+
+  private extractTextAndSpeaker(message: any): { text: string; speakerId: string; isFinal: boolean } | null {
+    const data = message?.data;
+    const st = data?.cn?.st;
+    const rtList = st?.rt;
+    if (!Array.isArray(rtList)) {
+      return null;
+    }
+
+    let text = '';
+    let speakerId = this.lastSpeakerId;
+
+    for (const rt of rtList) {
+      const wsList = rt?.ws;
+      if (!Array.isArray(wsList)) continue;
+
+      for (const ws of wsList) {
+        const candidates = ws?.cw;
+        if (!Array.isArray(candidates) || candidates.length === 0) continue;
+        const first = candidates[0];
+        if (typeof first?.w === 'string') {
+          text += first.w;
+        }
+        speakerId = this.normalizeSpeaker(first?.rl);
+      }
+    }
+
+    if (!text.trim()) {
+      return null;
+    }
+
+    // 移除开头的标点符号
+    text = text.replace(/^[。，、；：？！""''（）…·•※‥\s]+/, '').trim();
+
+    // 如果全是标点符号，返回 null
+    if (!text) {
+      return null;
+    }
+
+    const isFinal = String(st?.type) === '0' || Boolean(data?.ls);
+    return { text, speakerId, isFinal };
+  }
+
+  // 处理 WebSocket 消息（讯飞结果格式）
   private handleMessage(data: string) {
     try {
       const message = JSON.parse(data);
-      const { header, payload } = message;
-      
-      console.log('[听悟] 收到消息类型:', header?.name);
-      
-      switch (header?.name) {
-        case 'TranscriptionResultChanged':
-          console.log('[听悟] 识别中:', payload?.result || payload?.text || '');
-          this.onResult({
-            text: payload?.result || payload?.text || '',
-            speakerId: payload?.speaker_id || payload?.speakerId || 'unknown',
-            isFinal: false,
-            emotion: payload?.emotion,
-          });
-          break;
-          
-        case 'SentenceEnd':
-          console.log('[听悟] 最终结果:', payload?.result || payload?.text || '');
-          this.onResult({
-            text: payload?.result || payload?.text || '',
-            speakerId: payload?.speaker_id || payload?.speakerId || 'unknown',
-            isFinal: true,
-            emotion: payload?.emotion,
-          });
-          break;
-          
-        case 'SentenceBegin':
-          console.log('[听悟] 句子开始');
-          break;
-          
-        case 'TaskFailed':
-          console.error('[听悟] 任务失败:', payload);
-          break;
-          
-        default:
-          if (header?.name) {
-            console.log('[听悟] 未处理的消息类型:', header.name, payload);
-          }
+
+      if (message?.action === 'error') {
+        console.error('[讯飞] 服务端错误:', message);
+        return;
+      }
+
+      if (message?.msg_type === 'result' && message?.res_type === 'frc') {
+        console.error('[讯飞] 异常结果:', message?.data || message);
+        return;
+      }
+
+      if (message?.msg_type === 'result' && message?.res_type === 'asr') {
+        const parsed = this.extractTextAndSpeaker(message);
+        if (!parsed) {
+          return;
+        }
+
+        this.onResult({
+          text: parsed.text,
+          speakerId: parsed.speakerId,
+          isFinal: parsed.isFinal,
+        });
+        return;
+      }
+
+      if (message?.action === 'started') {
+        console.log('[讯飞] 握手完成:', message?.sid || '');
       }
     } catch (error) {
-      console.error('[听悟] 消息解析失败:', error, '原始数据:', data);
+      console.error('[讯飞] 消息解析失败:', error, '原始数据:', data);
     }
   }
 }
